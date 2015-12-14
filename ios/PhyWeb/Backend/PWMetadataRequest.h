@@ -15,7 +15,7 @@
  */
 
 #import <Foundation/Foundation.h>
-#import <UriBeacon/UriBeacon.h>
+#import "UriBeacon.h"
 
 @protocol PWMetadataRequestDelegate;
 
@@ -42,6 +42,8 @@
 // It will be nil if no error happened. Otherwise, it's the error that happened
 // during the request.
 @property(nonatomic, retain, readonly) NSError *error;
+
+@property(nonatomic, assign, readonly) NSTimeInterval delay;
 
 // Start the request.
 - (void)start;

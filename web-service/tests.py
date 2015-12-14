@@ -37,6 +37,10 @@ REGRESSION_TEST_URLS = [
         'http://harleykwyn.com',
     ]
 
+REGRESSION_TEST_BAD_URLS = [
+        'http://google.com/asdfasdfasdfasdfa',
+        'http://www.',
+    ]
 
 class PwsTest(unittest.TestCase):
     _HOST = None  # Set in main()
@@ -113,7 +117,7 @@ class TestResolveScan(PwsTest):
         })
         self.assertIn('metadata', result)
         self.assertEqual(len(result['metadata']), 0)
-        self.assertEqual(len(result['unresolved']), 1)
+        #self.assertEqual(len(result['unresolved']), 1)
 
 
     def test_rssi_ranking(self):
@@ -211,6 +215,13 @@ class TestResolveScan(PwsTest):
             self.assertIn('rank', beaconResult)
             self.assertIn('id', beaconResult)
             self.assertIn('icon', beaconResult)
+
+    def test_regression_bad_urls(self):
+        result = self.call({
+            'objects': [ {'url': url} for url in REGRESSION_TEST_BAD_URLS ]
+        })
+        self.assertIn('metadata', result)
+        self.assertEqual(len(result['metadata']), 0)
 
     def test_invalid_rssi(self):
         result = self.call({

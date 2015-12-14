@@ -16,12 +16,13 @@
 
 package org.physical_web.physicalweb;
 
+import org.physical_web.physicalweb.PwoMetadata.BleMetadata;
+import org.physical_web.physicalweb.PwoMetadata.UrlMetadata;
+
 import android.content.Context;
 import android.graphics.Bitmap;
-import android.net.Uri;
 import android.util.Log;
 
-import com.android.volley.Request;
 import com.android.volley.RequestQueue;
 import com.android.volley.Response;
 import com.android.volley.VolleyError;
@@ -33,9 +34,12 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import java.io.UnsupportedEncodingException;
-import java.net.URLEncoder;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * This class sends requests to the physical web service.
@@ -48,7 +52,6 @@ class PwsClient {
   private static final String PROD_URL = "https://url-caster.appspot.com";
   private static final String DEV_URL = "https://url-caster-dev.appspot.com";
   private static final String RESOLVE_SCAN_PATH = "resolve-scan";
-  private static final String DEMO_RESOLVE_SCAN_PATH = "demo";
   private static final String SHORTEN_URL_PATH = "shorten-url";
   private static final int UNDEFINED_SCORE = -1;
   private RequestQueue mRequestQueue;
@@ -76,8 +79,13 @@ class PwsClient {
   /////////////////////////////////
 
   public interface ResolveScanCallback {
-    public void onUrlMetadataReceived(String url, UrlMetadata urlMetadata, long tripMillis);
-    public void onUrlMetadataIconReceived();
+    public void onUrlMetadataReceived(PwoMetadata pwoMetadata);
+    public void onUrlMetadataAbsent(PwoMetadata pwoMetadata);
+  }
+
+  public interface DownloadIconCallback {
+    public void onUrlMetadataIconReceived(PwoMetadata pwoMetadata);
+    public void onUrlMetadataIconError(PwoMetadata pwoMetadata);
   }
 
   public interface ShortenUrlCallback {
@@ -139,25 +147,20 @@ class PwsClient {
     mRequestQueue.add(request);
   }
 
-  public void findUrlMetadata(String url,
-                              int txPower,
-                              int rssi,
+  public void findUrlMetadata(PwoMetadata pwoMetadata,
                               ResolveScanCallback resolveScanCallback,
                               final String tag) {
-    // Create the json request object
-    JSONObject jsonObj = createUrlMetadataRequestObject(url, txPower, rssi);
-    // Create the metadata request
-    // for the given json request object
-    JsonObjectRequest request = createUrlMetadataRequest(jsonObj, false, resolveScanCallback);
-    request.setTag(tag);
-    // Queue the request
-    mRequestQueue.add(request);
+    List<PwoMetadata> pwoMetadataList = Arrays.asList(pwoMetadata);
+    findUrlMetadata(pwoMetadataList, resolveScanCallback, tag);
   }
 
-  public void findDemoUrlMetadata(ResolveScanCallback resolveScanCallback, final String tag) {
+  public void findUrlMetadata(Collection<PwoMetadata> pwoMetadataCollection,
+                              ResolveScanCallback resolveScanCallback,
+                              final String tag) {
     // Create the metadata request
     // for the given json request object
-    JsonObjectRequest request = createUrlMetadataRequest(null, true, resolveScanCallback);
+    JsonObjectRequest request = createUrlMetadataRequest(pwoMetadataCollection,
+                                                         resolveScanCallback);
     request.setTag(tag);
     // Queue the request
     mRequestQueue.add(request);
@@ -171,15 +174,26 @@ class PwsClient {
    * @param url The url for which the request data will be created
    * @return The constructed json object
    */
-  private static JSONObject createUrlMetadataRequestObject(String url, int txPower, int rssi) {
+  private static JSONObject createUrlMetadataRequestObject(
+      Collection<PwoMetadata> pwoMetadataCollection) {
+    JSONArray urlJsonArray = new JSONArray();
+    for (PwoMetadata pwoMetadata : pwoMetadataCollection) {
+      try {
+        JSONObject urlJsonObject = new JSONObject();
+        urlJsonObject.put("url", pwoMetadata.url);
+        if (pwoMetadata.hasBleMetadata()) {
+          BleMetadata bleMetadata = pwoMetadata.bleMetadata;
+          urlJsonObject.put("txpower", bleMetadata.txPower);
+          urlJsonObject.put("rssi", bleMetadata.rssi);
+        }
+        urlJsonArray.put(urlJsonObject);
+      } catch (JSONException ex) {
+        Log.d(TAG, "error: " + ex);
+      }
+    }
+
     JSONObject jsonObject = new JSONObject();
     try {
-      JSONArray urlJsonArray = new JSONArray();
-      JSONObject urlJsonObject = new JSONObject();
-      urlJsonObject.put("url", url);
-      urlJsonObject.put("txpower", txPower);
-      urlJsonObject.put("rssi", rssi);
-      urlJsonArray.put(urlJsonObject);
       jsonObject.put("objects", urlJsonArray);
     } catch (JSONException ex) {
       Log.d(TAG, "error: " + ex);
@@ -188,98 +202,104 @@ class PwsClient {
   }
 
   /**
-   * Create the url metadata request,
-   * given the json request object
+   * Create the url metadata request, given the json request object.
    *
    * @param jsonObj The given json object to use in the request
    * @return The created json request object
    */
   private JsonObjectRequest createUrlMetadataRequest(
-      JSONObject jsonObj,
-      final boolean isDemoRequest,
+      final Collection<PwoMetadata> pwoMetadataCollection,
       final ResolveScanCallback resolveScanCallback) {
-    String resolveScanPath = RESOLVE_SCAN_PATH;
-    if (isDemoRequest) {
-        resolveScanPath = DEMO_RESOLVE_SCAN_PATH;
+    // Organize the PwoMetadata objects into a map
+    final Map<String, PwoMetadata> urlToPwoMetadata = new HashMap<>();
+    for (PwoMetadata pwoMetadata : pwoMetadataCollection) {
+      urlToPwoMetadata.put(pwoMetadata.url, pwoMetadata);
     }
+
+    // Create the json request object
+    JSONObject jsonObj = createUrlMetadataRequestObject(pwoMetadataCollection);
     final long creationTimestamp = new Date().getTime();
+    Response.Listener<JSONObject> responseListener = new Response.Listener<JSONObject>() {
+      // Called when the server returns a response
+      @Override
+      public void onResponse(JSONObject jsonResponse) {
 
-    return new JsonObjectRequest(
-        constructUrlStr(resolveScanPath),
-        jsonObj,
-        new Response.Listener<JSONObject>() {
-          // Called when the server returns a response
-          @Override
-          public void onResponse(JSONObject jsonResponse) {
-
-            // Build the metadata from the response
-            try {
-              JSONArray foundMetaData = jsonResponse.getJSONArray("metadata");
-
-              // Loop through the metadata for each url
-              if (foundMetaData.length() > 0) {
-
-                for (int i = 0; i < foundMetaData.length(); i++) {
-                  JSONObject jsonUrlMetadata = foundMetaData.getJSONObject(i);
-
-                  UrlMetadata urlMetadata = new UrlMetadata();
-                  urlMetadata.id = jsonUrlMetadata.getString("id");
-                  urlMetadata.siteUrl = jsonUrlMetadata.getString("url");
-                  urlMetadata.displayUrl = jsonUrlMetadata.getString("displayUrl");
-                  urlMetadata.title = jsonUrlMetadata.optString("title");
-                  urlMetadata.description = jsonUrlMetadata.optString("description");
-                  urlMetadata.iconUrl = jsonUrlMetadata.optString("icon");
-                  urlMetadata.rank = (float)jsonUrlMetadata.getDouble("rank");
-
-                  if (!urlMetadata.iconUrl.isEmpty()) {
-                    downloadIcon(urlMetadata, resolveScanCallback);
-                  }
-
-                  long tripMillis = new Date().getTime() - creationTimestamp;
-                  resolveScanCallback.onUrlMetadataReceived(urlMetadata.id, urlMetadata,
-                                                            tripMillis);
-                }
-
-              }
-            } catch (JSONException e) {
-              e.printStackTrace();
-            }
-          }
-        },
-        new Response.ErrorListener() {
-
-          @Override
-          public void onErrorResponse(VolleyError volleyError) {
-            Log.i(TAG, "VolleyError: " + volleyError.toString());
-          }
+        // Build the metadata from the response
+        JSONArray foundMetadata;
+        try {
+          foundMetadata = jsonResponse.getJSONArray("metadata");
+        } catch (JSONException e) {
+          Log.i(TAG, "Pws gave bad JSON: " + e);
+          return;
         }
-    );
+
+        // Loop through the metadata for each url
+        for (int i = 0; i < foundMetadata.length(); i++) {
+          UrlMetadata urlMetadata = new UrlMetadata();
+          try {
+            JSONObject jsonUrlMetadata = foundMetadata.getJSONObject(i);
+            urlMetadata.id = jsonUrlMetadata.getString("id");
+            urlMetadata.siteUrl = jsonUrlMetadata.getString("url");
+            urlMetadata.displayUrl = jsonUrlMetadata.getString("displayUrl");
+            urlMetadata.title = jsonUrlMetadata.optString("title");
+            urlMetadata.description = jsonUrlMetadata.optString("description");
+            urlMetadata.iconUrl = jsonUrlMetadata.optString("icon");
+            urlMetadata.rank = jsonUrlMetadata.getDouble("rank");
+            urlMetadata.groupid = jsonUrlMetadata.optString("groupid");
+          } catch (JSONException e) {
+            Log.i(TAG, "Pws gave bad JSON: " + e);
+            continue;
+          }
+
+          PwoMetadata pwoMetadata = urlToPwoMetadata.get(urlMetadata.id);
+          urlToPwoMetadata.remove(urlMetadata.id);
+          pwoMetadata.setUrlMetadata(urlMetadata,
+                                     new Date().getTime() - creationTimestamp);
+          resolveScanCallback.onUrlMetadataReceived(pwoMetadata);
+        }
+
+        // See which urls the PWS didn't give as a response for
+        for (PwoMetadata pwoMetadata : urlToPwoMetadata.values()) {
+          resolveScanCallback.onUrlMetadataAbsent(pwoMetadata);
+        }
+      }
+    };
+
+    Response.ErrorListener responseErrorListener = new Response.ErrorListener() {
+      @Override
+      public void onErrorResponse(VolleyError volleyError) {
+        Log.i(TAG, "VolleyError: " + volleyError.toString());
+      }
+    };
+
+    return new JsonObjectRequest(constructUrlStr(RESOLVE_SCAN_PATH), jsonObj, responseListener,
+                                 responseErrorListener);
   }
 
   /**
    * Asynchronously download the image for the url favicon.
    *
-   * @param urlMetadata The metadata for the given url
+   * @param pwoMetadata contains the relevant UrlMetadata
    */
-  private void downloadIcon(final UrlMetadata urlMetadata,
-                            final ResolveScanCallback resolveScanCallback) {
-    ImageRequest imageRequest = new ImageRequest(urlMetadata.iconUrl, new Response.Listener<Bitmap>() {
+  public void downloadIcon(final PwoMetadata pwoMetadata,
+                            final DownloadIconCallback downloadIconCallback) {
+    final UrlMetadata urlMetadata = pwoMetadata.urlMetadata;
+    Response.Listener<Bitmap> responseListener = new Response.Listener<Bitmap>() {
       @Override
       public void onResponse(Bitmap response) {
         urlMetadata.icon = response;
-        resolveScanCallback.onUrlMetadataIconReceived();
+        downloadIconCallback.onUrlMetadataIconReceived(pwoMetadata);
       }
-    }, 0, 0, null, null);
+    };
+    Response.ErrorListener errorListener = new Response.ErrorListener() {
+      @Override
+      public void onErrorResponse(VolleyError error) {
+        downloadIconCallback.onUrlMetadataIconError(pwoMetadata);
+      }
+    };
+    ImageRequest imageRequest = new ImageRequest(urlMetadata.iconUrl, responseListener, 0, 0, null,
+                                                 errorListener);
     mRequestQueue.add(imageRequest);
-  }
-
-  public String createUrlProxyGoLink(String url) {
-    try {
-      url = mContext.getString(R.string.proxy_go_link_base_url) + URLEncoder.encode(url, "UTF-8");
-    } catch (UnsupportedEncodingException e) {
-      e.printStackTrace();
-    }
-    return url;
   }
 
   public void cancelAllRequests(final String tag) {
@@ -292,32 +312,5 @@ class PwsClient {
 
   public void useDevEndpoint() {
       mEndpointUrl = DEV_URL;
-  }
-
-
-  /////////////////////////////////
-  // data models
-  /////////////////////////////////
-
-  /**
-   * A container class for a url's fetched metadata.
-   * The metadata consists of the title, site url, description,
-   * iconUrl and the icon (or favicon).
-   * This data is scraped via a server that receives a url
-   * and returns a json blob.
-   */
-  public static class UrlMetadata {
-    public String id;
-    public String siteUrl;
-    public String displayUrl;
-    public String title;
-    public String description;
-    public String iconUrl;
-    public Bitmap icon;
-    public float rank;
-
-    public UrlMetadata() {
-    }
-
   }
 }

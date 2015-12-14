@@ -24,7 +24,7 @@ except Exception as e:
         print "Warning: import exception '{0}'".format(e)
 
 from urllib import quote_plus
-from urlparse import urljoin, urlparse
+from urlparse import urljoin, urlparse, urlsplit, urlunsplit
 import cgi
 import datetime
 import json
@@ -52,9 +52,10 @@ def BuildResponse(objects):
         distance = ComputeDistance(rssi, txpower)
 
         def append_invalid():
-            unresolved_output.append({
-                'id': url
-            })
+            #unresolved_output.append({
+            #    'id': url
+            #})
+            pass
 
         if url is None:
             continue
@@ -74,12 +75,17 @@ def BuildResponse(objects):
             # It's a valid url, which we didn't fail to fetch, so it must be `No Content`
             continue
 
+        scheme, netloc, path, query, fragment = urlsplit(siteInfo.url)
+        if fragment == '':
+            fragment = parsed_url.fragment
+        finalUrl = urlunsplit((scheme, netloc, path, query, fragment))
+
         device_data = {}
         device_data['id'] = url
         # TODO: change url to the original url (perhaps minus our goo.gl shortened values)
-        device_data['url'] = siteInfo.url
+        device_data['url'] = finalUrl
         # TODO: change displayUrl to the "most applicable" url (resolve shorteners, but perhaps not all redirects)
-        device_data['displayUrl'] = siteInfo.url
+        device_data['displayUrl'] = finalUrl
         if siteInfo.title is not None:
             device_data['title'] = siteInfo.title
         if siteInfo.description is not None:
@@ -89,14 +95,22 @@ def BuildResponse(objects):
         if siteInfo.jsonlds is not None:
             device_data['json-ld'] = json.loads(siteInfo.jsonlds)
         device_data['distance'] = distance
+        try:
+            device_data['groupid'] = ComputeGroupId(siteInfo.url, siteInfo.title, siteInfo.description)
+        except Exception as e:
+            logging.error('ComputeGroupId url:{0}, title:{1}, description:{2}'.format(siteInfo.url, siteInfo.title, siteInfo.description))
+
         metadata_output.append(device_data)
+
 
     metadata_output = map(ReplaceDistanceWithRank, RankedResponse(metadata_output))
 
     ret = {
         "metadata": metadata_output,
-        "unresolved": unresolved_output,
     }
+
+    if unresolved_output:
+        ret["unresolved"] = unresolved_output
 
     return ret
 
@@ -127,6 +141,15 @@ def ReplaceDistanceWithRank(device_data):
     device_data['rank'] = distance
     device_data.pop('distance', None)
     return device_data
+
+################################################################################
+
+def ComputeGroupId(url, title, description):
+    import hashlib
+    domain = urlparse(url).netloc
+    seed = domain + '\0' + title
+    groupid = hashlib.sha1(seed.encode('utf-8')).hexdigest()[:16]
+    return groupid
 
 ################################################################################
 
@@ -184,6 +207,12 @@ def FetchAndStoreUrl(siteInfo, url, distance=None, force_update=False):
         return None
     elif result.status_code in [301, 302, 303, 307, 308]: # Moved Permanently, Found, See Other, Temporary Redirect, Permanent Redirect
         final_url = urljoin(url, result.headers['location'])
+
+        scheme, netloc, path, query, fragment = urlsplit(final_url)
+        if fragment == '':
+            fragment = urlparse(url).fragment
+        final_url = urlunsplit((scheme, netloc, path, query, fragment))
+
         logging.info('FetchAndStoreUrl url:{0}, redirects_to:{1}'.format(url, final_url))
         if siteInfo is not None:
             logging.info('Removing Stale Cache for url:{0}'.format(url))
